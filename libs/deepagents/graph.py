@@ -18,9 +18,11 @@ from langgraph.store.base import BaseStore
 from langgraph.types import Checkpointer
 
 from deepagents.backends.protocol import BackendFactory, BackendProtocol
+from deepagents.middleware.dmail import DMailMiddleware, DMailThresholds
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.subagents import CompiledSubAgent, SubAgent, SubAgentMiddleware
+from deepagents.tools.dmail import list_checkpoints, mark_checkpoint, send_dmail
 
 BASE_AGENT_PROMPT = "In order to complete the objective that the user asks of you, you have access to a number of standard tools."
 
@@ -53,6 +55,9 @@ def create_deep_agent(
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
+    enable_dmail: bool = False,
+    dmail_auto_checkpoints: bool = False,
+    dmail_thresholds: DMailThresholds | None = None,
 ) -> CompiledStateGraph:
     """Create a deep agent.
 
@@ -84,6 +89,10 @@ def create_deep_agent(
             callable factory like `lambda rt: StateBackend(rt)`.
         interrupt_on: Optional Dict[str, bool | InterruptOnConfig] mapping tool names to
             interrupt configs.
+        enable_dmail: Whether to attach D-Mail tools and middleware.
+        dmail_auto_checkpoints: Enable automatic checkpoint creation before expensive operations.
+        dmail_thresholds: Optional DMailThresholds instance to configure auto-checkpoint behavior.
+            If None, defaults will be used (max_auto_per_run=3, before_subagent=True, before_code_iteration=True).
         debug: Whether to enable debug mode. Passed through to create_agent.
         name: The name of the agent. Passed through to create_agent.
         cache: The cache to use for the agent. Passed through to create_agent.
@@ -94,35 +103,59 @@ def create_deep_agent(
     if model is None:
         model = get_default_model()
 
-    deepagent_middleware = [
+    configured_tools: list[BaseTool | Callable | dict[str, Any]] = list(tools) if tools is not None else []
+    if enable_dmail:
+        configured_tools.extend([mark_checkpoint, list_checkpoints, send_dmail])
+
+    thresholds = dmail_thresholds if dmail_thresholds is not None else DMailThresholds()
+
+    subagent_default_middleware: list[AgentMiddleware] = [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+    ]
+    if enable_dmail:
+        subagent_default_middleware.append(
+            DMailMiddleware(auto_checkpoints=dmail_auto_checkpoints, backend=backend, thresholds=thresholds)
+        )
+    subagent_default_middleware.extend(
+        [
+            SummarizationMiddleware(
+                model=model,
+                max_tokens_before_summary=170000,
+                messages_to_keep=6,
+            ),
+            AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+            PatchToolCallsMiddleware(),
+        ]
+    )
+
+    deepagent_middleware: list[AgentMiddleware] = [
         TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         SubAgentMiddleware(
             default_model=model,
-            default_tools=tools,
+            default_tools=configured_tools,
             subagents=subagents if subagents is not None else [],
-            default_middleware=[
-                TodoListMiddleware(),
-                FilesystemMiddleware(backend=backend),
-                SummarizationMiddleware(
-                    model=model,
-                    max_tokens_before_summary=170000,
-                    messages_to_keep=6,
-                ),
-                AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-                PatchToolCallsMiddleware(),
-            ],
+            default_middleware=subagent_default_middleware,
             default_interrupt_on=interrupt_on,
             general_purpose_agent=True,
         ),
-        SummarizationMiddleware(
-            model=model,
-            max_tokens_before_summary=170000,
-            messages_to_keep=6,
-        ),
-        AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
-        PatchToolCallsMiddleware(),
     ]
+    if enable_dmail:
+        deepagent_middleware.append(
+            DMailMiddleware(auto_checkpoints=dmail_auto_checkpoints, backend=backend, thresholds=thresholds)
+        )
+    deepagent_middleware.extend(
+        [
+            SummarizationMiddleware(
+                model=model,
+                max_tokens_before_summary=170000,
+                messages_to_keep=6,
+            ),
+            AnthropicPromptCachingMiddleware(unsupported_model_behavior="ignore"),
+            PatchToolCallsMiddleware(),
+        ]
+    )
     if middleware:
         deepagent_middleware.extend(middleware)
     if interrupt_on is not None:
@@ -131,7 +164,7 @@ def create_deep_agent(
     return create_agent(
         model,
         system_prompt=system_prompt + "\n\n" + BASE_AGENT_PROMPT if system_prompt else BASE_AGENT_PROMPT,
-        tools=tools,
+        tools=configured_tools,
         middleware=deepagent_middleware,
         response_format=response_format,
         context_schema=context_schema,

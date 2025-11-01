@@ -89,12 +89,33 @@ def parse_args():
         action="store_true",
         help="Auto-approve tool usage without prompting (disables human-in-the-loop)",
     )
+    parser.add_argument(
+        "--enable-dmail",
+        action="store_true",
+        help="Enable D-Mail temporal rollback (default: False)",
+    )
+    parser.add_argument(
+        "--dmail-auto-checkpoints",
+        action="store_true",
+        default=None,
+        help="Enable auto-checkpoints (default: True if D-Mail enabled)",
+    )
+    parser.add_argument(
+        "--dmail-max-auto",
+        type=int,
+        default=None,
+        help="Max auto-checkpoints per run (default: 3)",
+    )
 
     return parser.parse_args()
 
 
-async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0):
+async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0, enable_dmail: bool = False):
     """Main CLI loop."""
+    from pathlib import Path
+
+    agent_dir = Path.home() / ".deepagents" / (assistant_id or "agent")
+
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
@@ -149,7 +170,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker)
+            result = handle_command(user_input, agent, token_tracker, agent_dir, enable_dmail)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -170,8 +191,29 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
         execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
 
-async def main(assistant_id: str, session_state):
+async def main(assistant_id: str, session_state, args):
     """Main entry point."""
+    from .config import load_config
+
+    # Load agent config
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    config = load_config(agent_dir)
+
+    # Merge precedence: CLI args > config file > defaults
+    enable_dmail = args.enable_dmail or config.get("dmail", {}).get("enabled", False)
+    dmail_auto_checkpoints = (
+        args.dmail_auto_checkpoints
+        if args.dmail_auto_checkpoints is not None
+        else config.get("dmail", {}).get("auto_checkpoints", True)
+    )
+    dmail_max_auto = (
+        args.dmail_max_auto
+        if args.dmail_max_auto is not None
+        else config.get("dmail", {}).get("max_auto_per_run", 3)
+    )
+    dmail_before_subagent = config.get("dmail", {}).get("before_subagent", True)
+    dmail_before_code_iteration = config.get("dmail", {}).get("before_code_iteration", True)
+
     # Create the model (checks API keys)
     model = create_model()
 
@@ -180,7 +222,16 @@ async def main(assistant_id: str, session_state):
     if tavily_client is not None:
         tools.append(web_search)
 
-    agent = create_agent_with_config(model, assistant_id, tools)
+    agent = create_agent_with_config(
+        model,
+        assistant_id,
+        tools,
+        enable_dmail=enable_dmail,
+        dmail_auto_checkpoints=dmail_auto_checkpoints,
+        dmail_max_auto=dmail_max_auto,
+        dmail_before_subagent=dmail_before_subagent,
+        dmail_before_code_iteration=dmail_before_code_iteration,
+    )
 
     # Calculate baseline token count for accurate token tracking
     from .agent import get_system_prompt
@@ -191,7 +242,7 @@ async def main(assistant_id: str, session_state):
     baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 
     try:
-        await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+        await simple_cli(agent, assistant_id, session_state, baseline_tokens, enable_dmail)
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
@@ -215,7 +266,7 @@ def cli_main():
             session_state = SessionState(auto_approve=args.auto_approve)
 
             # API key validation happens in create_model()
-            asyncio.run(main(args.agent, session_state))
+            asyncio.run(main(args.agent, session_state, args))
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C - suppress ugly traceback
         console.print("\n\n[yellow]Interrupted[/yellow]")

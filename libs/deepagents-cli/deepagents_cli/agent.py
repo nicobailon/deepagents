@@ -7,6 +7,7 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware.dmail import DMailThresholds
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy
 from langgraph.checkpoint.memory import InMemorySaver
@@ -138,8 +139,31 @@ When using the write_todos tool:
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
 
 
-def create_agent_with_config(model, assistant_id: str, tools: list):
-    """Create and configure an agent with the specified model and tools."""
+def create_agent_with_config(
+    model,
+    assistant_id: str,
+    tools: list,
+    enable_dmail: bool = False,
+    dmail_auto_checkpoints: bool = False,
+    dmail_max_auto: int = 3,
+    dmail_before_subagent: bool = True,
+    dmail_before_code_iteration: bool = True,
+):
+    """Create and configure an agent with the specified model and tools.
+
+    Args:
+        model: The language model to use
+        assistant_id: Agent identifier for memory stores
+        tools: List of tools available to the agent
+        enable_dmail: Whether to enable D-Mail temporal rollback
+        dmail_auto_checkpoints: Enable automatic checkpoint creation
+        dmail_max_auto: Max auto-checkpoints per run
+        dmail_before_subagent: Create checkpoints before subagent calls
+        dmail_before_code_iteration: Create checkpoints before code iteration
+
+    Returns:
+        Configured agent instance
+    """
     shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
     )
@@ -258,6 +282,12 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
+    thresholds = DMailThresholds(
+        max_auto_per_run=dmail_max_auto,
+        before_subagent=dmail_before_subagent,
+        before_code_iteration=dmail_before_code_iteration,
+    )
+
     agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
@@ -271,6 +301,9 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
             "web_search": web_search_interrupt_config,
             "task": task_interrupt_config,
         },
+        enable_dmail=enable_dmail,
+        dmail_auto_checkpoints=dmail_auto_checkpoints,
+        dmail_thresholds=thresholds,
     ).with_config(config)
 
     agent.checkpointer = InMemorySaver()

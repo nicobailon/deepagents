@@ -6,7 +6,8 @@ import termios
 import threading
 import tty
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from deepagents.constants import DMAIL_RESUME_FLAG
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import Command
 from rich import box
 from rich.markdown import Markdown
@@ -23,6 +24,7 @@ from .ui import (
     render_file_operation,
     render_summary_panel,
     render_todo_list,
+    resolve_checkpoint_alias,
 )
 
 
@@ -368,6 +370,35 @@ def execute_task(
                     # Extract chunk_data from updates for todo checking
                     chunk_data = list(data.values())[0] if data else None
                     if chunk_data and isinstance(chunk_data, dict):
+                        # Check for D-Mail rewind notification
+                        if DMAIL_RESUME_FLAG in chunk_data and chunk_data[DMAIL_RESUME_FLAG]:
+                            # Get checkpoint info from state
+                            state = agent.get_state(config).values
+                            checkpoints = state.get("dmail_checkpoints", [])
+
+                            # Extract target checkpoint ID from most recent D-Mail message
+                            to_checkpoint_id = None
+                            messages = state.get("messages", [])
+                            for msg in reversed(messages):
+                                if (
+                                    isinstance(msg, SystemMessage)
+                                    and msg.name == "dmail"
+                                    and msg.additional_kwargs.get("dmail")
+                                ):
+                                    to_checkpoint_id = msg.additional_kwargs.get("to_checkpoint_id")
+                                    break
+
+                            # Resolve alias for display
+                            alias = resolve_checkpoint_alias(to_checkpoint_id or "unknown", checkpoints)
+
+                            # Display rewind notification
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
+                            console.print()
+                            console.print(f"  ⏪ Rewound to checkpoint {alias} (D-Mail)", style=COLORS["primary"])
+                            console.print()
+
                         # Check for todo updates
                         if "todos" in chunk_data:
                             new_todos = chunk_data["todos"]
