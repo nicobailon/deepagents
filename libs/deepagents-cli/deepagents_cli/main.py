@@ -102,7 +102,6 @@ def parse_args():
     )
     parser.add_argument(
         "--dmail-max-auto-before",
-        "--dmail-max-auto",
         dest="dmail_max_auto_before",
         type=int,
         default=None,
@@ -261,20 +260,10 @@ async def main(assistant_id: str, session_state, args):
         else _coerce_bool(dmail_config.get("auto_checkpoints"), True)
     )
 
-    legacy_before_values = {
-        key: dmail_config.get(key) for key in ("before_subagent", "before_code_iteration") if key in dmail_config
-    }
-
-    legacy_before_flag = any(_coerce_bool(value, False) for value in legacy_before_values.values())
-
-    max_auto_before_cfg = dmail_config.get("max_auto_before_per_run")
-    if max_auto_before_cfg is None:
-        max_auto_before_cfg = dmail_config.get("max_auto_per_run")
-
     max_auto_before = (
         args.dmail_max_auto_before
         if args.dmail_max_auto_before is not None
-        else _coerce_int(max_auto_before_cfg, 15)
+        else _coerce_int(dmail_config.get("max_auto_before_per_run"), 15)
     )
 
     max_auto_after = (
@@ -283,17 +272,10 @@ async def main(assistant_id: str, session_state, args):
         else _coerce_int(dmail_config.get("max_auto_after_per_run"), 20)
     )
 
-    if "before_every_tool" in dmail_config:
-        before_every_tool_default = _coerce_bool(dmail_config.get("before_every_tool"), True)
-    elif legacy_before_values:
-        before_every_tool_default = legacy_before_flag
-    else:
-        before_every_tool_default = True
-
     before_every_tool = (
         args.dmail_before_every_tool
         if args.dmail_before_every_tool is not None
-        else before_every_tool_default
+        else _coerce_bool(dmail_config.get("before_every_tool"), True)
     )
 
     after_every_tool = (

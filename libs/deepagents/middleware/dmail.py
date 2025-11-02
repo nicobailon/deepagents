@@ -79,11 +79,7 @@ class DMailCheckpoint:
 
 @dataclass
 class DMailThresholds:
-    """Configuration for auto-checkpoint thresholds.
-
-    Legacy knobs ``max_auto_per_run``, ``before_subagent`` and ``before_code_iteration``
-    are accepted for backward compatibility and mapped onto v2 semantics.
-    """
+    """Configuration for auto-checkpoint thresholds."""
 
     before_first_user_message: bool = True
     before_every_tool: bool = True
@@ -91,18 +87,8 @@ class DMailThresholds:
     after_every_tool: bool = True
     after_agent_response: bool = True
     max_auto_after_per_run: int = 20
-    # Legacy inputs (kept for compatibility)
-    max_auto_per_run: int | None = None
-    before_subagent: bool | None = None
-    before_code_iteration: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.max_auto_per_run is not None:
-            self.max_auto_before_per_run = self.max_auto_per_run
-        legacy_before = (self.before_subagent or False) or (self.before_code_iteration or False)
-        if legacy_before:
-            self.before_every_tool = True
-        # Clamp to non-negative counts when explicitly configured
         if self.max_auto_before_per_run < 0:
             self.max_auto_before_per_run = 0
         if self.max_auto_after_per_run < 0:

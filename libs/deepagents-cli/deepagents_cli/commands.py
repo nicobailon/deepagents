@@ -158,24 +158,9 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
                 console.print("[bold]D-Mail Configuration:[/bold]", style=COLORS["primary"])
                 enabled = _coerce_bool(dmail_cfg.get("enabled"), False)
                 auto_checkpoints = _coerce_bool(dmail_cfg.get("auto_checkpoints"), True)
-                max_auto_before = _coerce_int(
-                    dmail_cfg.get("max_auto_before_per_run", dmail_cfg.get("max_auto_per_run")), 15
-                )
+                max_auto_before = _coerce_int(dmail_cfg.get("max_auto_before_per_run"), 15)
                 max_auto_after = _coerce_int(dmail_cfg.get("max_auto_after_per_run"), 20)
-
-                legacy_before_values = {
-                    key: dmail_cfg[key]
-                    for key in ("before_subagent", "before_code_iteration")
-                    if key in dmail_cfg
-                }
-
-                if "before_every_tool" in dmail_cfg:
-                    before_every_tool = _coerce_bool(dmail_cfg.get("before_every_tool"), True)
-                elif legacy_before_values:
-                    before_every_tool = any(_coerce_bool(val, False) for val in legacy_before_values.values())
-                else:
-                    before_every_tool = True
-
+                before_every_tool = _coerce_bool(dmail_cfg.get("before_every_tool"), True)
                 after_every_tool = _coerce_bool(dmail_cfg.get("after_every_tool"), True)
                 after_agent_response = _coerce_bool(dmail_cfg.get("after_agent_response"), True)
                 before_first_user_message = _coerce_bool(dmail_cfg.get("before_first_user_message"), True)
@@ -188,24 +173,6 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
                 console.print(f"  after_every_tool: {after_every_tool}")
                 console.print(f"  after_agent_response: {after_agent_response}")
                 console.print(f"  before_first_user_message: {before_first_user_message}")
-
-                legacy_notes = []
-                if "max_auto_per_run" in dmail_cfg:
-                    legacy_notes.append(f"max_auto_per_run={dmail_cfg['max_auto_per_run']}")
-                if legacy_before_values:
-                    for key, val in legacy_before_values.items():
-                        legacy_notes.append(f"{key}={val}")
-
-                if legacy_notes:
-                    console.print()
-                    console.print(
-                        "[yellow]Legacy keys detected:[/yellow] " + ", ".join(legacy_notes),
-                        style=COLORS["dim"],
-                    )
-                    console.print(
-                        "[dim]These values are ignored once new fields are set; use the options above.[/dim]"
-                    )
-
                 console.print()
                 return True
 
@@ -222,7 +189,7 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
                 console.print()
                 return True
 
-            if option in {"max-auto-before", "max-auto"} and len(args) > 1:
+            if option == "max-auto-before" and len(args) > 1:
                 try:
                     value = int(args[1])
                 except ValueError:
@@ -235,8 +202,6 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
                 save_config(agent_dir, config)
                 console.print()
                 console.print(f"[green]✓[/green] max_auto_before_per_run set to {value}")
-                if option == "max-auto":
-                    console.print("[dim]Note: max-auto is deprecated; use max-auto-before going forward.[/dim]")
                 console.print("[dim]Restart CLI for changes to take effect[/dim]")
                 console.print()
                 return True
