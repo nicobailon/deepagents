@@ -28,6 +28,26 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
     Returns:
         'exit' to exit, True if handled, False to pass to agent
     """
+
+    def _coerce_bool(value, default):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    def _coerce_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     parts = command.strip().lstrip("/").split()
     if not parts:
         return False
@@ -120,24 +140,81 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
             from .config import load_config, save_config
 
             config = load_config(agent_dir)
+            dmail_cfg = config.get("dmail", {}) if isinstance(config.get("dmail"), dict) else {}
             args = parts[2:]
+
+            def _parse_bool_arg(raw: str) -> bool:
+                lowered = raw.lower()
+                truthy = {"on", "true", "1", "yes", "enable", "enabled"}
+                falsy = {"off", "false", "0", "no", "disable", "disabled"}
+                if lowered in truthy:
+                    return True
+                if lowered in falsy:
+                    return False
+                raise ValueError
 
             if not args:
                 console.print()
                 console.print("[bold]D-Mail Configuration:[/bold]", style=COLORS["primary"])
-                console.print(f"  enabled: {config.get('dmail', {}).get('enabled', False)}")
-                console.print(f"  auto_checkpoints: {config.get('dmail', {}).get('auto_checkpoints', True)}")
-                console.print(f"  max_auto_per_run: {config.get('dmail', {}).get('max_auto_per_run', 3)}")
-                console.print(f"  before_subagent: {config.get('dmail', {}).get('before_subagent', True)}")
-                console.print(
-                    f"  before_code_iteration: {config.get('dmail', {}).get('before_code_iteration', True)}"
+                enabled = _coerce_bool(dmail_cfg.get("enabled"), False)
+                auto_checkpoints = _coerce_bool(dmail_cfg.get("auto_checkpoints"), True)
+                max_auto_before = _coerce_int(
+                    dmail_cfg.get("max_auto_before_per_run", dmail_cfg.get("max_auto_per_run")), 15
                 )
+                max_auto_after = _coerce_int(dmail_cfg.get("max_auto_after_per_run"), 20)
+
+                legacy_before_values = {
+                    key: dmail_cfg[key]
+                    for key in ("before_subagent", "before_code_iteration")
+                    if key in dmail_cfg
+                }
+
+                if "before_every_tool" in dmail_cfg:
+                    before_every_tool = _coerce_bool(dmail_cfg.get("before_every_tool"), True)
+                elif legacy_before_values:
+                    before_every_tool = any(_coerce_bool(val, False) for val in legacy_before_values.values())
+                else:
+                    before_every_tool = True
+
+                after_every_tool = _coerce_bool(dmail_cfg.get("after_every_tool"), True)
+                after_agent_response = _coerce_bool(dmail_cfg.get("after_agent_response"), True)
+                before_first_user_message = _coerce_bool(dmail_cfg.get("before_first_user_message"), True)
+
+                console.print(f"  enabled: {enabled}")
+                console.print(f"  auto_checkpoints: {auto_checkpoints}")
+                console.print(f"  max_auto_before_per_run: {max_auto_before}")
+                console.print(f"  max_auto_after_per_run: {max_auto_after}")
+                console.print(f"  before_every_tool: {before_every_tool}")
+                console.print(f"  after_every_tool: {after_every_tool}")
+                console.print(f"  after_agent_response: {after_agent_response}")
+                console.print(f"  before_first_user_message: {before_first_user_message}")
+
+                legacy_notes = []
+                if "max_auto_per_run" in dmail_cfg:
+                    legacy_notes.append(f"max_auto_per_run={dmail_cfg['max_auto_per_run']}")
+                if legacy_before_values:
+                    for key, val in legacy_before_values.items():
+                        legacy_notes.append(f"{key}={val}")
+
+                if legacy_notes:
+                    console.print()
+                    console.print(
+                        "[yellow]Legacy keys detected:[/yellow] " + ", ".join(legacy_notes),
+                        style=COLORS["dim"],
+                    )
+                    console.print(
+                        "[dim]These values are ignored once new fields are set; use the options above.[/dim]"
+                    )
+
                 console.print()
                 return True
 
-            if args[0] == "auto" and len(args) > 1:
-                value = args[1].lower() in ("on", "true", "1")
-                config.setdefault("dmail", {})["auto_checkpoints"] = value
+            option = args[0].lower()
+            dmail_section = config.setdefault("dmail", {})
+
+            if option == "auto" and len(args) > 1:
+                value = _parse_bool_arg(args[1])
+                dmail_section["auto_checkpoints"] = value
                 save_config(agent_dir, config)
                 console.print()
                 console.print(f"[green]✓[/green] auto_checkpoints set to {value}")
@@ -145,24 +222,71 @@ def handle_command(command: str, agent, token_tracker: TokenTracker, agent_dir: 
                 console.print()
                 return True
 
-            if args[0] == "max-auto" and len(args) > 1:
+            if option in {"max-auto-before", "max-auto"} and len(args) > 1:
                 try:
                     value = int(args[1])
-                    config.setdefault("dmail", {})["max_auto_per_run"] = value
-                    save_config(agent_dir, config)
-                    console.print()
-                    console.print(f"[green]✓[/green] max_auto_per_run set to {value}")
-                    console.print("[dim]Restart CLI for changes to take effect[/dim]")
-                    console.print()
                 except ValueError:
                     console.print()
-                    console.print("[red]Error:[/red] max-auto requires an integer")
+                    console.print("[red]Error:[/red] max-auto-before requires an integer")
                     console.print()
+                    return True
+
+                dmail_section["max_auto_before_per_run"] = value
+                save_config(agent_dir, config)
+                console.print()
+                console.print(f"[green]✓[/green] max_auto_before_per_run set to {value}")
+                if option == "max-auto":
+                    console.print("[dim]Note: max-auto is deprecated; use max-auto-before going forward.[/dim]")
+                console.print("[dim]Restart CLI for changes to take effect[/dim]")
+                console.print()
+                return True
+
+            if option == "max-auto-after" and len(args) > 1:
+                try:
+                    value = int(args[1])
+                except ValueError:
+                    console.print()
+                    console.print("[red]Error:[/red] max-auto-after requires an integer")
+                    console.print()
+                    return True
+
+                dmail_section["max_auto_after_per_run"] = value
+                save_config(agent_dir, config)
+                console.print()
+                console.print(f"[green]✓[/green] max_auto_after_per_run set to {value}")
+                console.print("[dim]Restart CLI for changes to take effect[/dim]")
+                console.print()
+                return True
+
+            toggle_map = {
+                "before-every-tool": "before_every_tool",
+                "after-every-tool": "after_every_tool",
+                "after-response": "after_agent_response",
+                "before-first-message": "before_first_user_message",
+            }
+
+            if option in toggle_map and len(args) > 1:
+                try:
+                    value = _parse_bool_arg(args[1])
+                except ValueError:
+                    console.print()
+                    console.print("[red]Error:[/red] Value must be on/off")
+                    console.print()
+                    return True
+
+                dmail_section[toggle_map[option]] = value
+                save_config(agent_dir, config)
+                console.print()
+                console.print(f"[green]✓[/green] {toggle_map[option]} set to {value}")
+                console.print("[dim]Restart CLI for changes to take effect[/dim]")
+                console.print()
                 return True
 
             console.print()
             console.print(f"[yellow]Unknown config option: {args[0]}[/yellow]")
-            console.print("[dim]Available: auto on|off, max-auto N[/dim]")
+            console.print(
+                "[dim]Available: auto on|off, max-auto-before N, max-auto-after N, before-every-tool on|off, after-every-tool on|off, after-response on|off, before-first-message on|off[/dim]"
+            )
             console.print()
             return True
 

@@ -92,7 +92,9 @@ def create_deep_agent(
         enable_dmail: Whether to attach D-Mail tools and middleware.
         dmail_auto_checkpoints: Enable automatic checkpoint creation before expensive operations.
         dmail_thresholds: Optional DMailThresholds instance to configure auto-checkpoint behavior.
-            If None, defaults will be used (max_auto_per_run=3, before_subagent=True, before_code_iteration=True).
+            If None, aggressive defaults are used (before_first_user_message=True,
+            before_every_tool=True, max_auto_before_per_run=15, after_every_tool=True,
+            after_agent_response=True, max_auto_after_per_run=20).
         debug: Whether to enable debug mode. Passed through to create_agent.
         name: The name of the agent. Passed through to create_agent.
         cache: The cache to use for the agent. Passed through to create_agent.

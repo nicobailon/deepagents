@@ -101,10 +101,43 @@ def parse_args():
         help="Enable auto-checkpoints (default: True if D-Mail enabled)",
     )
     parser.add_argument(
+        "--dmail-max-auto-before",
         "--dmail-max-auto",
+        dest="dmail_max_auto_before",
         type=int,
         default=None,
-        help="Max auto-checkpoints per run (default: 3)",
+        help="Max automatic checkpoints before tool execution per run (default: 15)",
+    )
+    parser.add_argument(
+        "--dmail-max-auto-after",
+        dest="dmail_max_auto_after",
+        type=int,
+        default=None,
+        help="Max automatic checkpoints after tool execution per run (default: 20)",
+    )
+    parser.add_argument(
+        "--dmail-before-every-tool",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints before every non D-Mail tool (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-after-every-tool",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints after every non D-Mail tool (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-after-response",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints after each agent response (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-before-first-message",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle task-start checkpoint before the first user message (default: True)",
     )
 
     return parser.parse_args()
@@ -200,19 +233,86 @@ async def main(assistant_id: str, session_state, args):
     config = load_config(agent_dir)
 
     # Merge precedence: CLI args > config file > defaults
-    enable_dmail = args.enable_dmail or config.get("dmail", {}).get("enabled", False)
+    dmail_config = config.get("dmail", {}) if isinstance(config.get("dmail"), dict) else {}
+
+    def _coerce_bool(value, default):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    def _coerce_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    enable_dmail = args.enable_dmail or _coerce_bool(dmail_config.get("enabled"), False)
     dmail_auto_checkpoints = (
         args.dmail_auto_checkpoints
         if args.dmail_auto_checkpoints is not None
-        else config.get("dmail", {}).get("auto_checkpoints", True)
+        else _coerce_bool(dmail_config.get("auto_checkpoints"), True)
     )
-    dmail_max_auto = (
-        args.dmail_max_auto
-        if args.dmail_max_auto is not None
-        else config.get("dmail", {}).get("max_auto_per_run", 3)
+
+    legacy_before_values = {
+        key: dmail_config.get(key) for key in ("before_subagent", "before_code_iteration") if key in dmail_config
+    }
+
+    legacy_before_flag = any(_coerce_bool(value, False) for value in legacy_before_values.values())
+
+    max_auto_before_cfg = dmail_config.get("max_auto_before_per_run")
+    if max_auto_before_cfg is None:
+        max_auto_before_cfg = dmail_config.get("max_auto_per_run")
+
+    max_auto_before = (
+        args.dmail_max_auto_before
+        if args.dmail_max_auto_before is not None
+        else _coerce_int(max_auto_before_cfg, 15)
     )
-    dmail_before_subagent = config.get("dmail", {}).get("before_subagent", True)
-    dmail_before_code_iteration = config.get("dmail", {}).get("before_code_iteration", True)
+
+    max_auto_after = (
+        args.dmail_max_auto_after
+        if args.dmail_max_auto_after is not None
+        else _coerce_int(dmail_config.get("max_auto_after_per_run"), 20)
+    )
+
+    if "before_every_tool" in dmail_config:
+        before_every_tool_default = _coerce_bool(dmail_config.get("before_every_tool"), True)
+    elif legacy_before_values:
+        before_every_tool_default = legacy_before_flag
+    else:
+        before_every_tool_default = True
+
+    before_every_tool = (
+        args.dmail_before_every_tool
+        if args.dmail_before_every_tool is not None
+        else before_every_tool_default
+    )
+
+    after_every_tool = (
+        args.dmail_after_every_tool
+        if args.dmail_after_every_tool is not None
+        else _coerce_bool(dmail_config.get("after_every_tool"), True)
+    )
+
+    after_agent_response = (
+        args.dmail_after_response
+        if args.dmail_after_response is not None
+        else _coerce_bool(dmail_config.get("after_agent_response"), True)
+    )
+
+    before_first_message = (
+        args.dmail_before_first_message
+        if args.dmail_before_first_message is not None
+        else _coerce_bool(dmail_config.get("before_first_user_message"), True)
+    )
 
     # Create the model (checks API keys)
     model = create_model()
@@ -228,9 +328,12 @@ async def main(assistant_id: str, session_state, args):
         tools,
         enable_dmail=enable_dmail,
         dmail_auto_checkpoints=dmail_auto_checkpoints,
-        dmail_max_auto=dmail_max_auto,
-        dmail_before_subagent=dmail_before_subagent,
-        dmail_before_code_iteration=dmail_before_code_iteration,
+        dmail_max_auto_before=max_auto_before,
+        dmail_max_auto_after=max_auto_after,
+        dmail_before_every_tool=before_every_tool,
+        dmail_after_every_tool=after_every_tool,
+        dmail_after_agent_response=after_agent_response,
+        dmail_before_first_message=before_first_message,
     )
 
     # Calculate baseline token count for accurate token tracking

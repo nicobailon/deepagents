@@ -142,7 +142,12 @@ def test_dmail_config_show(tmp_path, capsys):
 [dmail]
 enabled = true
 auto_checkpoints = false
-max_auto_per_run = 5
+max_auto_before_per_run = 7
+max_auto_after_per_run = 9
+before_every_tool = false
+after_every_tool = true
+after_agent_response = true
+before_first_user_message = false
 """
     )
 
@@ -156,7 +161,7 @@ max_auto_per_run = 5
 
     # Verify output contains config values
     captured = capsys.readouterr()
-    assert "enabled" in captured.out or "auto_checkpoints" in captured.out
+    assert "max_auto_before_per_run" in captured.out
 
 
 def test_dmail_disabled_message(tmp_path, capsys):

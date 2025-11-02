@@ -145,9 +145,12 @@ def create_agent_with_config(
     tools: list,
     enable_dmail: bool = False,
     dmail_auto_checkpoints: bool = False,
-    dmail_max_auto: int = 3,
-    dmail_before_subagent: bool = True,
-    dmail_before_code_iteration: bool = True,
+    dmail_max_auto_before: int = 15,
+    dmail_max_auto_after: int = 20,
+    dmail_before_every_tool: bool = True,
+    dmail_after_every_tool: bool = True,
+    dmail_after_agent_response: bool = True,
+    dmail_before_first_message: bool = True,
 ):
     """Create and configure an agent with the specified model and tools.
 
@@ -157,9 +160,12 @@ def create_agent_with_config(
         tools: List of tools available to the agent
         enable_dmail: Whether to enable D-Mail temporal rollback
         dmail_auto_checkpoints: Enable automatic checkpoint creation
-        dmail_max_auto: Max auto-checkpoints per run
-        dmail_before_subagent: Create checkpoints before subagent calls
-        dmail_before_code_iteration: Create checkpoints before code iteration
+        dmail_max_auto_before: Max automatic checkpoints bound before tool execution
+        dmail_max_auto_after: Max automatic checkpoints bound after tool execution
+        dmail_before_every_tool: Auto checkpoint before each non D-Mail tool call
+        dmail_after_every_tool: Auto checkpoint after each non D-Mail tool call
+        dmail_after_agent_response: Auto checkpoint at each user→agent turn boundary
+        dmail_before_first_message: Auto checkpoint before the first user message is processed
 
     Returns:
         Configured agent instance
@@ -283,9 +289,12 @@ def create_agent_with_config(
     }
 
     thresholds = DMailThresholds(
-        max_auto_per_run=dmail_max_auto,
-        before_subagent=dmail_before_subagent,
-        before_code_iteration=dmail_before_code_iteration,
+        before_first_user_message=dmail_before_first_message,
+        before_every_tool=dmail_before_every_tool,
+        max_auto_before_per_run=dmail_max_auto_before,
+        after_every_tool=dmail_after_every_tool,
+        after_agent_response=dmail_after_agent_response,
+        max_auto_after_per_run=dmail_max_auto_after,
     )
 
     agent = create_deep_agent(

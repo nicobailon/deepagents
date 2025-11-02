@@ -12,7 +12,7 @@ from langgraph.types import Overwrite
 
 from deepagents import DMailMiddleware, create_deep_agent, run_until_stable
 from deepagents.constants import DMAIL_RESUME_FLAG
-from deepagents.middleware.dmail import DMAIL_SYSTEM_PROMPT
+from deepagents.middleware.dmail import DMAIL_SYSTEM_PROMPT, DMailThresholds
 from deepagents.middleware.subagents import SubAgentMiddleware
 from deepagents.tools.dmail import list_checkpoints, mark_checkpoint, send_dmail
 from langchain.agents.middleware.summarization import SummarizationMiddleware
@@ -68,8 +68,8 @@ class StubChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self._response))])
 
 
-def _tool_runtime(state: dict[str, Any]) -> ToolRuntime:
-    return ToolRuntime(state=state, context=None, tool_call_id="", store=None, stream_writer=lambda _: None, config={})
+def _tool_runtime(state: dict[str, Any], context: Any | None = None) -> ToolRuntime:
+    return ToolRuntime(state=state, context=context, tool_call_id="", store=None, stream_writer=lambda _: None, config={})
 
 
 class TestDMailTools:
@@ -257,53 +257,237 @@ class TestRunUntilStable:
         assert result["messages"][0].content == "done"
 
 
-class TestPhase2Features:
-    def test_auto_checkpoint_on_read_file_without_limit(self):
-        from deepagents.middleware.dmail import DMailThresholds
+class TestAutoCheckpointingV2:
+    def test_before_first_user_message_creates_task_start_once(self):
+        state: dict[str, Any] = {"messages": [HumanMessage(content="hello")], "dmail_checkpoints": []}
+        runtime = DummyRuntime(checkpoint_id="chk-001", thread_id="thread-1")
+        middleware = DMailMiddleware(auto_checkpoints=True)
 
-        state: dict[str, Any] = {"dmail_checkpoints": []}
-        runtime = _tool_runtime(state)
-        request = ToolCallRequest(
-            tool_call={"name": "read_file", "args": {"path": "/large.txt"}, "id": "call-1"},
-            tool=lambda: None,
-            state=state,
-            runtime=runtime,
+        middleware.before_agent(state, runtime)
+
+        checkpoints = state["dmail_checkpoints"]
+        assert len(checkpoints) == 1
+        assert checkpoints[0]["reason"] == "auto:before_first_message"
+        assert checkpoints[0]["name"].startswith("task-start")
+        counters = state["dmail_counters"]
+        assert counters["before"] == 1
+
+        # Re-running before_agent should not create a duplicate when a checkpoint already exists.
+        middleware.before_agent(state, runtime)
+        assert len(state["dmail_checkpoints"]) == 1
+
+    def test_before_every_tool_binds_alias_and_counts_quota(self):
+        thresholds = DMailThresholds(
+            before_first_user_message=False,
+            after_every_tool=False,
+            after_agent_response=False,
+            max_auto_before_per_run=1,
         )
-        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=DMailThresholds())
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds)
+        runtime = DummyRuntime(checkpoint_id="chk-010", thread_id="thread-1")
+        state: dict[str, Any] = {"messages": [HumanMessage(content="turn")], "dmail_checkpoints": []}
+        middleware.before_agent(state, runtime)
 
         def handler(req):
             return None
 
+        request = ToolCallRequest(
+            tool_call={"name": "read_file", "args": {}, "id": "call-1"},
+            tool=lambda: None,
+            state=state,
+            runtime=_tool_runtime(state, context=runtime),
+        )
         middleware.wrap_tool_call(request, handler)
-        assert "__dmail_pending_aliases__" in state
-        pending = state["__dmail_pending_aliases__"]
-        assert len(pending) == 1
-        assert pending[0]["reason"] == "auto:read_file"
 
-    def test_auto_checkpoint_respects_max_limit(self):
-        from deepagents.middleware.dmail import DMailThresholds
+        checkpoints = state["dmail_checkpoints"]
+        assert len(checkpoints) == 1
+        assert checkpoints[0]["reason"] == "auto:before_read_file"
+        assert state["dmail_counters"]["before"] == 1
 
+        # Quota reached; subsequent calls should not add new before-checkpoints.
+        request_2 = ToolCallRequest(
+            tool_call={"name": "read_file", "args": {}, "id": "call-2"},
+            tool=lambda: None,
+            state=state,
+            runtime=_tool_runtime(state, context=runtime),
+        )
+        middleware.wrap_tool_call(request_2, handler)
+        assert len(state["dmail_checkpoints"]) == 1
+
+    def test_before_every_tool_skips_dmail_tools(self):
+        thresholds = DMailThresholds(before_first_user_message=False)
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds)
+        runtime = DummyRuntime(checkpoint_id="chk-020", thread_id="thread-1")
+        state: dict[str, Any] = {"messages": [HumanMessage(content="turn")], "dmail_checkpoints": []}
+
+        middleware.before_agent(state, runtime)
+
+        def handler(req):
+            return send_dmail.invoke(req.tool_call["args"])
+
+        request = ToolCallRequest(
+            tool_call={"name": "send_dmail", "args": {"checkpoint": "alpha", "message": "note"}, "id": "call-1"},
+            tool=send_dmail,
+            state=state,
+            runtime=_tool_runtime(state, context=runtime),
+        )
+
+        middleware.wrap_tool_call(request, handler)
+        assert not state.get("dmail_checkpoints")  # No auto-checkpoint recorded
+        assert state["dmail_counters"]["before"] == 0
+
+    def test_after_every_tool_success_and_error_cases(self):
+        thresholds = DMailThresholds(
+            before_first_user_message=False,
+            before_every_tool=False,
+            after_every_tool=True,
+            after_agent_response=False,
+            max_auto_after_per_run=5,
+        )
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds)
+
+        # Success case
+        runtime_success = DummyRuntime(checkpoint_id="chk-030", thread_id="thread-1")
+        state_success: dict[str, Any] = {"messages": [HumanMessage(content="run")], "dmail_checkpoints": []}
+        middleware.before_agent(state_success, runtime_success)
+
+        def success_handler(req):
+            return "ok"
+
+        request_success = ToolCallRequest(
+            tool_call={"name": "shell", "args": {}, "id": "call-success"},
+            tool=lambda: None,
+            state=state_success,
+            runtime=_tool_runtime(state_success, context=runtime_success),
+        )
+        middleware.wrap_tool_call(request_success, success_handler)
+        checkpoints = state_success["dmail_checkpoints"]
+        assert checkpoints[-1]["reason"] == "auto:after_shell_success"
+        assert state_success["dmail_counters"]["after"] == 1
+
+        # Error via ToolMessage
+        runtime_error = DummyRuntime(checkpoint_id="chk-031", thread_id="thread-1")
+        state_error: dict[str, Any] = {"messages": [HumanMessage(content="run")], "dmail_checkpoints": []}
+        middleware.before_agent(state_error, runtime_error)
+
+        def toolerror_handler(req):
+            return ToolMessage(content="Error: failed", tool_call_id=req.tool_call.get("id"), name="shell")
+
+        request_error = ToolCallRequest(
+            tool_call={"name": "shell", "args": {}, "id": "call-error"},
+            tool=lambda: None,
+            state=state_error,
+            runtime=_tool_runtime(state_error, context=runtime_error),
+        )
+        middleware.wrap_tool_call(request_error, toolerror_handler)
+        assert state_error["dmail_checkpoints"][-1]["reason"] == "auto:after_shell_error"
+
+        # Error via exception
+        runtime_exc = DummyRuntime(checkpoint_id="chk-032", thread_id="thread-1")
+        state_exc: dict[str, Any] = {"messages": [HumanMessage(content="run")], "dmail_checkpoints": []}
+        middleware.before_agent(state_exc, runtime_exc)
+
+        def raise_handler(req):
+            raise ValueError("boom")
+
+        request_exc = ToolCallRequest(
+            tool_call={"name": "shell", "args": {}, "id": "call-exc"},
+            tool=lambda: None,
+            state=state_exc,
+            runtime=_tool_runtime(state_exc, context=runtime_exc),
+        )
+        try:
+            middleware.wrap_tool_call(request_exc, raise_handler)
+        except ValueError:
+            pass
+        assert state_exc["dmail_checkpoints"][-1]["reason"] == "auto:after_shell_error"
+
+    def test_after_agent_response_on_user_ai_boundary(self):
+        thresholds = DMailThresholds(
+            before_first_user_message=False,
+            before_every_tool=False,
+            after_every_tool=False,
+            after_agent_response=True,
+        )
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds)
+        runtime = DummyRuntime(checkpoint_id="chk-040", thread_id="thread-1")
+        state: dict[str, Any] = {
+            "messages": [HumanMessage(content="question"), AIMessage(content="answer")],
+            "dmail_checkpoints": [],
+        }
+
+        middleware.after_agent(state, runtime)
+        checkpoints = state["dmail_checkpoints"]
+        assert len(checkpoints) == 1
+        assert checkpoints[0]["reason"] == "auto:after_response"
+        assert state["dmail_counters"]["after"] == 1
+
+    def test_counters_reset_each_user_turn(self):
+        thresholds = DMailThresholds(
+            before_first_user_message=False,
+            after_every_tool=False,
+            after_agent_response=False,
+            max_auto_before_per_run=1,
+        )
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds)
+        runtime = DummyRuntime(checkpoint_id="chk-050", thread_id="thread-1")
+        state: dict[str, Any] = {
+            "messages": [HumanMessage(content="turn1")],
+            "dmail_checkpoints": [],
+        }
+
+        middleware.before_agent(state, runtime)
+
+        def handler(req):
+            return None
+
+        request = ToolCallRequest(
+            tool_call={"name": "ls", "args": {}, "id": "call-1"},
+            tool=lambda: None,
+            state=state,
+            runtime=_tool_runtime(state, context=runtime),
+        )
+        middleware.wrap_tool_call(request, handler)
+        assert state["dmail_counters"]["before"] == 1
+
+        state["messages"].append(AIMessage(content="ack"))
+        state["messages"].append(HumanMessage(content="turn2"))
+        middleware.before_agent(state, runtime)
+        assert state["dmail_counters"]["before"] == 0
+
+    def test_retention_cap_does_not_drop_recent_aliases_when_large_quota(self):
+        thresholds = DMailThresholds(
+            before_first_user_message=False,
+            after_every_tool=False,
+            after_agent_response=False,
+        )
         state: dict[str, Any] = {
             "dmail_checkpoints": [
-                {"id": "1", "name": "auto-1", "created_at": "t1", "reason": "auto:read_file"},
-                {"id": "2", "name": "auto-2", "created_at": "t2", "reason": "auto:task"},
-                {"id": "3", "name": "auto-3", "created_at": "t3", "reason": "auto:edit_file"},
+                {"id": "old", "name": "old-1", "created_at": "t1", "reason": "manual"},
+                {"id": "old", "name": "old-2", "created_at": "t2", "reason": "manual"},
+                {"id": "old", "name": "old-3", "created_at": "t3", "reason": "manual"},
             ]
         }
-        runtime = _tool_runtime(state)
-        request = ToolCallRequest(
-            tool_call={"name": "read_file", "args": {"path": "/another.txt"}, "id": "call-1"},
-            tool=lambda: None,
-            state=state,
-            runtime=runtime,
-        )
-        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=DMailThresholds(max_auto_per_run=3))
+        runtime = DummyRuntime(checkpoint_id="chk-060", thread_id="thread-1")
+        middleware = DMailMiddleware(auto_checkpoints=True, thresholds=thresholds, max_checkpoints=3)
 
         def handler(req):
             return None
 
+        request = ToolCallRequest(
+            tool_call={"name": "shell", "args": {}, "id": "call-1"},
+            tool=lambda: None,
+            state=state,
+            runtime=_tool_runtime(state, context=runtime),
+        )
+
         middleware.wrap_tool_call(request, handler)
-        assert "__dmail_pending_aliases__" not in state
+
+        checkpoints = state["dmail_checkpoints"]
+        assert len(checkpoints) == 3
+        names = {cp["name"] for cp in checkpoints}
+        assert "old-1" not in names  # Oldest entry trimmed
+        assert any(cp["reason"] == "auto:before_shell" for cp in checkpoints)
 
     def test_send_dmail_with_attachments(self):
         from langgraph.types import Command
