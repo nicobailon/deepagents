@@ -7,6 +7,11 @@ from pathlib import Path
 import dotenv
 from rich.console import Console
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    raise RuntimeError("Python 3.11+ required")
+
 dotenv.load_dotenv()
 
 # Color scheme
@@ -41,6 +46,7 @@ COMMANDS = {
     "clear": "Clear screen and reset conversation",
     "help": "Show help information",
     "tokens": "Show token usage for current session",
+    "dmail": "Show D-Mail audit (checkpoints and rewind history)",
     "quit": "Exit the CLI",
     "exit": "Exit the CLI",
 }
@@ -96,6 +102,39 @@ def get_default_coding_instructions() -> str:
     """
     default_prompt_path = Path(__file__).parent / "default_agent_prompt.md"
     return default_prompt_path.read_text()
+
+
+def load_config(agent_dir: Path) -> dict:
+    """Load per-agent config from agent_dir/config.toml.
+
+    Args:
+        agent_dir: Path to agent directory
+
+    Returns:
+        Configuration dictionary (empty dict if file doesn't exist)
+    """
+    config_path = agent_dir / "config.toml"
+    if not config_path.exists():
+        return {}
+
+    with open(config_path, "rb") as f:
+        return tomllib.load(f)
+
+
+def save_config(agent_dir: Path, config_dict: dict) -> None:
+    """Save config to agent_dir/config.toml.
+
+    Args:
+        agent_dir: Path to agent directory
+        config_dict: Configuration dictionary to save
+    """
+    import tomli_w
+
+    config_path = agent_dir / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(config_path, "wb") as f:
+        tomli_w.dump(config_dict, f)
 
 
 def create_model():

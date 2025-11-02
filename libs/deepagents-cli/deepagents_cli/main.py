@@ -89,12 +89,65 @@ def parse_args():
         action="store_true",
         help="Auto-approve tool usage without prompting (disables human-in-the-loop)",
     )
+    parser.add_argument(
+        "--enable-dmail",
+        action="store_true",
+        help="Enable D-Mail temporal rollback (default: False)",
+    )
+    parser.add_argument(
+        "--dmail-auto-checkpoints",
+        action="store_true",
+        default=None,
+        help="Enable auto-checkpoints (default: True if D-Mail enabled)",
+    )
+    parser.add_argument(
+        "--dmail-max-auto-before",
+        dest="dmail_max_auto_before",
+        type=int,
+        default=None,
+        help="Max automatic checkpoints before tool execution per run (default: 15)",
+    )
+    parser.add_argument(
+        "--dmail-max-auto-after",
+        dest="dmail_max_auto_after",
+        type=int,
+        default=None,
+        help="Max automatic checkpoints after tool execution per run (default: 20)",
+    )
+    parser.add_argument(
+        "--dmail-before-every-tool",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints before every non D-Mail tool (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-after-every-tool",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints after every non D-Mail tool (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-after-response",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle automatic checkpoints after each agent response (default: True)",
+    )
+    parser.add_argument(
+        "--dmail-before-first-message",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Toggle task-start checkpoint before the first user message (default: True)",
+    )
 
     return parser.parse_args()
 
 
-async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0):
+async def simple_cli(agent, assistant_id: str | None, session_state, baseline_tokens: int = 0, enable_dmail: bool = False):
     """Main CLI loop."""
+    from pathlib import Path
+
+    agent_dir = Path.home() / ".deepagents" / (assistant_id or "agent")
+
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
     console.print()
@@ -149,7 +202,7 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
 
         # Check for slash commands first
         if user_input.startswith("/"):
-            result = handle_command(user_input, agent, token_tracker)
+            result = handle_command(user_input, agent, token_tracker, agent_dir, enable_dmail)
             if result == "exit":
                 console.print("\nGoodbye!", style=COLORS["primary"])
                 break
@@ -170,8 +223,79 @@ async def simple_cli(agent, assistant_id: str | None, session_state, baseline_to
         execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
 
-async def main(assistant_id: str, session_state):
+async def main(assistant_id: str, session_state, args):
     """Main entry point."""
+    from .config import load_config
+
+    # Load agent config
+    agent_dir = Path.home() / ".deepagents" / assistant_id
+    config = load_config(agent_dir)
+
+    # Merge precedence: CLI args > config file > defaults
+    dmail_config = config.get("dmail", {}) if isinstance(config.get("dmail"), dict) else {}
+
+    def _coerce_bool(value, default):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    def _coerce_int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    enable_dmail = args.enable_dmail or _coerce_bool(dmail_config.get("enabled"), False)
+    dmail_auto_checkpoints = (
+        args.dmail_auto_checkpoints
+        if args.dmail_auto_checkpoints is not None
+        else _coerce_bool(dmail_config.get("auto_checkpoints"), True)
+    )
+
+    max_auto_before = (
+        args.dmail_max_auto_before
+        if args.dmail_max_auto_before is not None
+        else _coerce_int(dmail_config.get("max_auto_before_per_run"), 15)
+    )
+
+    max_auto_after = (
+        args.dmail_max_auto_after
+        if args.dmail_max_auto_after is not None
+        else _coerce_int(dmail_config.get("max_auto_after_per_run"), 20)
+    )
+
+    before_every_tool = (
+        args.dmail_before_every_tool
+        if args.dmail_before_every_tool is not None
+        else _coerce_bool(dmail_config.get("before_every_tool"), True)
+    )
+
+    after_every_tool = (
+        args.dmail_after_every_tool
+        if args.dmail_after_every_tool is not None
+        else _coerce_bool(dmail_config.get("after_every_tool"), True)
+    )
+
+    after_agent_response = (
+        args.dmail_after_response
+        if args.dmail_after_response is not None
+        else _coerce_bool(dmail_config.get("after_agent_response"), True)
+    )
+
+    before_first_message = (
+        args.dmail_before_first_message
+        if args.dmail_before_first_message is not None
+        else _coerce_bool(dmail_config.get("before_first_user_message"), True)
+    )
+
     # Create the model (checks API keys)
     model = create_model()
 
@@ -180,7 +304,19 @@ async def main(assistant_id: str, session_state):
     if tavily_client is not None:
         tools.append(web_search)
 
-    agent = create_agent_with_config(model, assistant_id, tools)
+    agent = create_agent_with_config(
+        model,
+        assistant_id,
+        tools,
+        enable_dmail=enable_dmail,
+        dmail_auto_checkpoints=dmail_auto_checkpoints,
+        dmail_max_auto_before=max_auto_before,
+        dmail_max_auto_after=max_auto_after,
+        dmail_before_every_tool=before_every_tool,
+        dmail_after_every_tool=after_every_tool,
+        dmail_after_agent_response=after_agent_response,
+        dmail_before_first_message=before_first_message,
+    )
 
     # Calculate baseline token count for accurate token tracking
     from .agent import get_system_prompt
@@ -191,7 +327,7 @@ async def main(assistant_id: str, session_state):
     baseline_tokens = calculate_baseline_tokens(model, agent_dir, system_prompt)
 
     try:
-        await simple_cli(agent, assistant_id, session_state, baseline_tokens)
+        await simple_cli(agent, assistant_id, session_state, baseline_tokens, enable_dmail)
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
@@ -215,7 +351,7 @@ def cli_main():
             session_state = SessionState(auto_approve=args.auto_approve)
 
             # API key validation happens in create_model()
-            asyncio.run(main(args.agent, session_state))
+            asyncio.run(main(args.agent, session_state, args))
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C - suppress ugly traceback
         console.print("\n\n[yellow]Interrupted[/yellow]")

@@ -95,7 +95,11 @@ in the same way you would any LangGraph agent.
 
 **Long-term Memory**
 
- Extend agents with persistent memory across threads using LangGraph’s Store. Agents can save and retrieve information from previous conversations.
+ Extend agents with persistent memory across threads using LangGraph's Store. Agents can save and retrieve information from previous conversations.
+
+**D-Mail Temporal Rollback**
+
+ Agents can create checkpoints and rewind to earlier states with compact summaries, discarding verbose exploration. This prevents context overflow during large file reads, trial-and-error debugging, or extensive research tasks.
 
 ## Customizing Deep Agents
 
@@ -294,8 +298,34 @@ agent = create_deep_agent(
 )
 ```
 
+### `enable_dmail`
+
+D-Mail enables agents to rewind timelines to earlier checkpoints with compact summaries, preventing context overflow during exploration. In v2, checkpoints are created before the first user message, before and after every non D-Mail tool call, and after each agent response (subject to per-run quotas). When the agent rewinds, the timeline jumps back to the checkpoint while the compressed insight survives.
+
+```python
+from deepagents import create_deep_agent
+from deepagents.middleware.dmail import DMailThresholds
+from langgraph.checkpoint.memory import MemorySaver
+
+agent = create_deep_agent(
+    enable_dmail=True,
+    dmail_auto_checkpoints=True,
+    dmail_thresholds=DMailThresholds(
+        before_first_user_message=True,
+        before_every_tool=True,
+        max_auto_before_per_run=15,
+        after_every_tool=True,
+        after_agent_response=True,
+        max_auto_after_per_run=20,
+    ),
+    checkpointer=MemorySaver(),
+)
+```
+
+**Use cases**: Large file analysis, trial-and-error debugging, extensive web research. Granular checkpoints plus split before/after quotas preserve successful steps while containing exploration noise. Typical token savings: 10-100× reduction on exploration tasks.
+
 ### `interrupt_on`
-A common reality for agents is that some tool operations may be sensitive and require human approval before execution. Deep Agents supports human-in-the-loop workflows through LangGraph’s interrupt capabilities. You can configure which tools require approval using a checkpointer.
+A common reality for agents is that some tool operations may be sensitive and require human approval before execution. Deep Agents supports human-in-the-loop workflows through LangGraph's interrupt capabilities. You can configure which tools require approval using a checkpointer.
 
 These tool configs are passed to our prebuilt [HITL middleware](https://docs.langchain.com/oss/python/langchain/middleware#human-in-the-loop) so that the agent pauses execution and waits for feedback from the user before executing configured tools.
 
@@ -326,8 +356,9 @@ Deep Agents are built with a modular middleware architecture. As a reminder, Dee
 - A planning tool
 - A filesystem for storing context and long-term memories
 - The ability to spawn subagents
+- Temporal rollback for context optimization
 
-Each of these features is implemented as separate middleware. When you create a deep agent with `create_deep_agent`, we automatically attach **PlanningMiddleware**, **FilesystemMiddleware** and **SubAgentMiddleware** to your agent.
+Each of these features is implemented as separate middleware. When you create a deep agent with `create_deep_agent`, we automatically attach **TodoListMiddleware**, **FilesystemMiddleware**, **SubAgentMiddleware**, and optionally **DMailMiddleware** to your agent.
 
 Middleware is a composable concept, and you can choose to add as many or as few middleware to an agent depending on your use case. That means that you can also use any of the aforementioned middleware independently!
 
@@ -452,6 +483,41 @@ agent = create_agent(
     ],
 )
 ```
+
+### DMailMiddleware
+
+Context overflow from exploration tasks can degrade agent performance. **DMailMiddleware** provides temporal rollback: agents auto-checkpoint before the first user turn, around every tool call, and after each reply, then rewind with compact summaries once key findings are extracted.
+
+The agent gets three tools:
+- **mark_checkpoint**: Create a savepoint with optional name/reason
+- **list_checkpoints**: View available checkpoints
+- **send_dmail**: Rewind to a checkpoint with a summary message, optionally attaching files
+
+```python
+from langchain.agents import create_agent
+from deepagents.middleware.dmail import DMailMiddleware, DMailThresholds
+from langgraph.checkpoint.memory import MemorySaver
+
+agent = create_agent(
+    model="anthropic:claude-sonnet-4-20250514",
+    middleware=[
+        DMailMiddleware(
+            auto_checkpoints=True,
+            thresholds=DMailThresholds(
+                before_first_user_message=True,
+                before_every_tool=True,
+                after_every_tool=True,
+                after_agent_response=True,
+                max_auto_before_per_run=10,
+                max_auto_after_per_run=14,
+            ),
+        ),
+    ],
+    checkpointer=MemorySaver(),
+)
+```
+
+Automatic checkpoints fire before/after every non D-Mail tool. Split quotas (`max_auto_before_per_run`, `max_auto_after_per_run`) and a higher retention cap (64 aliases by default) prevent checkpoint spam while preserving recovery points. When the agent sends a D-Mail, the timeline rewinds to that checkpoint and only the summary remains—discarding verbose exploration that would bloat context. A LangGraph checkpointer (e.g., `MemorySaver`) is required for D-Mail to function.
 
 ## Sync vs Async
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware.dmail import DMailThresholds
 from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from langchain.agents.middleware import HostExecutionPolicy
 from langgraph.checkpoint.memory import InMemorySaver
@@ -138,8 +139,37 @@ When using the write_todos tool:
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
 
 
-def create_agent_with_config(model, assistant_id: str, tools: list):
-    """Create and configure an agent with the specified model and tools."""
+def create_agent_with_config(
+    model,
+    assistant_id: str,
+    tools: list,
+    enable_dmail: bool = False,
+    dmail_auto_checkpoints: bool = False,
+    dmail_max_auto_before: int = 15,
+    dmail_max_auto_after: int = 20,
+    dmail_before_every_tool: bool = True,
+    dmail_after_every_tool: bool = True,
+    dmail_after_agent_response: bool = True,
+    dmail_before_first_message: bool = True,
+):
+    """Create and configure an agent with the specified model and tools.
+
+    Args:
+        model: The language model to use
+        assistant_id: Agent identifier for memory stores
+        tools: List of tools available to the agent
+        enable_dmail: Whether to enable D-Mail temporal rollback
+        dmail_auto_checkpoints: Enable automatic checkpoint creation
+        dmail_max_auto_before: Max automatic checkpoints bound before tool execution
+        dmail_max_auto_after: Max automatic checkpoints bound after tool execution
+        dmail_before_every_tool: Auto checkpoint before each non D-Mail tool call
+        dmail_after_every_tool: Auto checkpoint after each non D-Mail tool call
+        dmail_after_agent_response: Auto checkpoint at each user→agent turn boundary
+        dmail_before_first_message: Auto checkpoint before the first user message is processed
+
+    Returns:
+        Configured agent instance
+    """
     shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(), execution_policy=HostExecutionPolicy()
     )
@@ -258,6 +288,15 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
         "description": lambda tool_call, state, runtime: format_task_description(tool_call),
     }
 
+    thresholds = DMailThresholds(
+        before_first_user_message=dmail_before_first_message,
+        before_every_tool=dmail_before_every_tool,
+        max_auto_before_per_run=dmail_max_auto_before,
+        after_every_tool=dmail_after_every_tool,
+        after_agent_response=dmail_after_agent_response,
+        max_auto_after_per_run=dmail_max_auto_after,
+    )
+
     agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
@@ -271,6 +310,9 @@ def create_agent_with_config(model, assistant_id: str, tools: list):
             "web_search": web_search_interrupt_config,
             "task": task_interrupt_config,
         },
+        enable_dmail=enable_dmail,
+        dmail_auto_checkpoints=dmail_auto_checkpoints,
+        dmail_thresholds=thresholds,
     ).with_config(config)
 
     agent.checkpointer = InMemorySaver()

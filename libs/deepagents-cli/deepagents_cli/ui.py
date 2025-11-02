@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import SystemMessage
 from rich import box
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 
 from .config import COLORS, COMMANDS, DEEP_AGENTS_ASCII, MAX_ARG_LENGTH, console
@@ -407,6 +409,169 @@ def show_interactive_help():
     console.print()
 
 
+def extract_dmail_timeline(state: dict) -> list[dict]:
+    """Extract D-Mail events from SystemMessage entries in messages.
+
+    Args:
+        state: Agent state dictionary containing messages
+
+    Returns:
+        List of D-Mail event dictionaries with checkpoint IDs, messages, and attachments
+    """
+    timeline = []
+    messages = state.get("messages", [])
+
+    for msg in messages:
+        if isinstance(msg, SystemMessage) and msg.name == "dmail" and msg.additional_kwargs.get("dmail"):
+            timeline.append(
+                {
+                    "from_checkpoint_id": msg.additional_kwargs.get("from_checkpoint_id"),
+                    "to_checkpoint_id": msg.additional_kwargs.get("to_checkpoint_id"),
+                    "message": msg.content,
+                    "attached_mem_paths": msg.additional_kwargs.get("attached_mem_paths", []),
+                    "reason": msg.additional_kwargs.get("reason"),
+                }
+            )
+
+    return timeline
+
+
+def resolve_checkpoint_alias(checkpoint_id: str, checkpoints: list[dict]) -> str:
+    """Resolve checkpoint ID to alias name, fallback to short ID.
+
+    Args:
+        checkpoint_id: The checkpoint ID to resolve
+        checkpoints: List of checkpoint alias dictionaries
+
+    Returns:
+        Resolved alias name or shortened checkpoint ID
+    """
+    if not checkpoint_id:
+        return "unknown"
+
+    for cp in checkpoints:
+        if cp.get("id") == checkpoint_id:
+            return cp.get("name") or checkpoint_id[:8]
+
+    return checkpoint_id[:8]
+
+
+def estimate_abandoned_tokens(timeline: list[dict]) -> int:
+    """Rough estimate of context saved by D-Mail rewinds.
+
+    Uses simple character-based heuristic (4 chars ≈ 1 token).
+
+    Args:
+        timeline: List of D-Mail event dictionaries
+
+    Returns:
+        Estimated token count (approximate)
+    """
+    total_chars = sum(len(entry.get("message", "")) for entry in timeline)
+    return total_chars // 4
+
+
+def render_dmail_audit(checkpoints: list[dict], timeline: list[dict], enabled: bool = True) -> None:
+    """Render D-Mail audit pane with checkpoints and timeline.
+
+    Args:
+        checkpoints: List of checkpoint alias dictionaries
+        timeline: List of D-Mail event dictionaries
+        enabled: Whether D-Mail is currently enabled
+    """
+    if not enabled:
+        console.print()
+        console.print("[bold]D-Mail is not enabled.[/bold]", style="yellow")
+        console.print()
+        console.print("To enable, run with:")
+        console.print("  deepagents --enable-dmail", style="dim")
+        console.print()
+        console.print("Or add to ~/.deepagents/<agent>/config.toml:")
+        console.print("  [dmail]", style="dim")
+        console.print("  enabled = true", style="dim")
+        console.print()
+        return
+
+    console.print()
+    console.print(Panel("[bold]D-Mail Audit[/bold]", style=COLORS["primary"], box=box.ROUNDED))
+    console.print()
+
+    recent_checkpoints = checkpoints[-5:] if len(checkpoints) > 5 else checkpoints
+
+    if recent_checkpoints:
+        console.print("[bold]Checkpoint Aliases[/bold] (5 most recent):", style=COLORS["primary"])
+        console.print()
+
+        table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        table.add_column("Status", style="bold", width=3)
+        table.add_column("Name", style="cyan")
+        table.add_column("Time", style="dim")
+        table.add_column("Type", style="dim")
+
+        for cp in reversed(recent_checkpoints):
+            name = cp.get("name", "unnamed")
+            reason = cp.get("reason", "")
+            created_at = cp.get("created_at", "")
+
+            # Defensive timestamp parsing: handle ISO format or fallback gracefully
+            time_str = ""
+            if created_at:
+                if "T" in created_at:
+                    parts = created_at.split("T")
+                    if len(parts) > 1 and len(parts[1]) >= 5:
+                        time_str = parts[1][:5]  # Extract HH:MM from ISO timestamp
+                    else:
+                        time_str = created_at[:8]  # Fallback to first 8 chars
+                else:
+                    time_str = created_at[:8] if len(created_at) >= 8 else created_at
+
+            is_auto = reason and reason.startswith("auto:")
+            status_icon = "[yellow]●[/yellow]" if is_auto else "[green]●[/green]"
+            type_str = "auto" if is_auto else "manual"
+
+            table.add_row(status_icon, name, time_str, type_str)
+
+        console.print(table)
+        console.print()
+    else:
+        console.print("[dim]No checkpoints yet[/dim]")
+        console.print()
+
+    if timeline:
+        console.print(f"[bold]D-Mail Timeline[/bold] ({len(timeline)} rewinds):", style=COLORS["primary"])
+        console.print()
+
+        for entry in timeline:
+            from_id = entry.get("from_checkpoint_id", "unknown")
+            to_id = entry.get("to_checkpoint_id", "unknown")
+            message = entry.get("message", "")
+            attachments = entry.get("attached_mem_paths", [])
+
+            from_alias = resolve_checkpoint_alias(from_id, checkpoints)
+            to_alias = resolve_checkpoint_alias(to_id, checkpoints)
+
+            console.print(f"🕰️  [cyan]{from_alias}[/cyan] → [cyan]{to_alias}[/cyan]")
+
+            if message:
+                preview = message[:100] + "..." if len(message) > 100 else message
+                console.print(f"   {preview!r}", style="dim")
+
+            if attachments:
+                for path in attachments:
+                    display_path = truncate_value(path, max_length=60)
+                    console.print(f"   Attached: {display_path}", style="dim yellow")
+
+            console.print()
+
+        abandoned = estimate_abandoned_tokens(timeline)
+        if abandoned > 0:
+            console.print(f"[dim]Abandoned Context: ~{abandoned:,} tokens pruned (est.)[/dim]")
+            console.print()
+    else:
+        console.print("[dim]No D-Mail rewinds yet[/dim]")
+        console.print()
+
+
 def show_help():
     """Show help information."""
     console.print()
@@ -414,13 +579,17 @@ def show_help():
     console.print()
 
     console.print("[bold]Usage:[/bold]", style=COLORS["primary"])
-    console.print("  deepagents [--agent NAME] [--auto-approve]     Start interactive session")
-    console.print("  deepagents list                                List all available agents")
-    console.print("  deepagents reset --agent AGENT                 Reset agent to default prompt")
     console.print(
-        "  deepagents reset --agent AGENT --target SOURCE Reset agent to copy of another agent"
+        "  deepagents [--agent NAME] [--auto-approve] [--enable-dmail]  Start interactive session"
     )
-    console.print("  deepagents help                                Show this help message")
+    console.print("  deepagents list                                          List all available agents")
+    console.print(
+        "  deepagents reset --agent AGENT                               Reset agent to default prompt"
+    )
+    console.print(
+        "  deepagents reset --agent AGENT --target SOURCE               Reset agent to copy of another agent"
+    )
+    console.print("  deepagents help                                          Show this help message")
     console.print()
 
     console.print("[bold]Examples:[/bold]", style=COLORS["primary"])
@@ -445,6 +614,24 @@ def show_help():
         "  deepagents reset --agent mybot --target other # Reset mybot to copy of 'other' agent",
         style=COLORS["dim"],
     )
+    console.print()
+
+    console.print("[bold]D-Mail Options:[/bold]", style=COLORS["primary"])
+    console.print("  --enable-dmail              Enable D-Mail temporal rollback")
+    console.print(
+        "  --dmail-auto-checkpoints    Enable auto-checkpoints (default: True if D-Mail enabled)"
+    )
+    console.print("  --dmail-max-auto N          Max auto-checkpoints per run (default: 3)")
+    console.print()
+    console.print("[bold]D-Mail Commands:[/bold]", style=COLORS["primary"])
+    console.print("  /dmail                      Show D-Mail audit (checkpoints and rewind history)")
+    console.print("  /dmail checkpoints          Show only checkpoint aliases")
+    console.print("  /dmail log                  Show only D-Mail timeline")
+    console.print("  /dmail config               Show current D-Mail configuration")
+    console.print("  /dmail config auto on|off   Toggle auto-checkpoints (persists to config.toml)")
+    console.print("  /dmail config max-auto N    Set max auto-checkpoints (persists to config.toml)")
+    console.print()
+    console.print("[dim]Note: Config changes require CLI restart to take effect[/dim]")
     console.print()
 
     console.print("[bold]Long-term Memory:[/bold]", style=COLORS["primary"])
